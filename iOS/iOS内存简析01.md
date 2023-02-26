@@ -195,11 +195,11 @@
 
              ​		**delloc( )** ---> **rootDelloc( )** ---> **fastPath( )判定** ---> **YES** ---> **free( )**
 
-             ​																↓
+             ​																            ↓
 
-             ​																**NO**		
+             ​																           **NO**		
 
-             ​																↓			
+             ​																            ↓			
 
         ​																执行 **object_dispose( )** --> **objc_destructInstance( )** ---> **free( )**
 
