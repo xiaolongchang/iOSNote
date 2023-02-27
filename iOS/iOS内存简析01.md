@@ -168,88 +168,69 @@
      
 
 5. #### 野指针线上处理方案
+   ##### 内存重新填充方式 Malloc Scribble
+      ###### 1）原理：官方文档对Malloc Scribble的定义
+   > If set, fill memory that has been allocated with 0xaa bytes.<br/>
+   > This increases the likelihood that a program making assumptions about the contents of freshly allocated memory will fail.<br/>
+   > Also if set, fill memory that has been deallocated with 0x55 bytes.<br/>
+   > This increases the likelihood that a program will fail due to accessing memory that is no longer allocated.<br/>
+   > Note that due to the way in which freed memory is managed internally, the 0x55 pattern may not appear in some parts of a deallocated memory block.<br/>
+   >
+   > 如果设置，则用0xaa字节填充已分配的内存。<br/>
+   > 这增加了对新分配内存内容进行假设的程序失败的可能性。<br/>
+   > 同样，如果设置了，则用0x55字节填充已释放的内存。<br/>
+   > 这增加了程序由于访问不再分配的内存而失败的可能性。<br/>
+   > 注意，由于内部管理释放内存的方式，0x55模式可能不会出现在已释放内存块的某些部分。
 
-   1. - ##### 内存重新填充方式 Malloc Scribble
 
-        1. - ###### 1）原理：官方文档对Malloc Scribble的定义
+                  
+                  
+      ###### 2）如何实现:
+      按照官方对 Malloc Scribble的思路，结合遇到的类似问题点，可以在对象被释放的时间点做处理，继而引出对象释放的流程：<br>
+      ```
+      delloc( ) --->	rootDelloc( )--->fastPath( )判定 --->	YES --->free( )
+                                          ↓
+                                          NO
+                                          ↓
+                                 执行object_dispose( ) -->	objc_destructInstance( ) ---> free( )
+      ```
+       
+      其中**objc_destructInstance**定义：Destroys an instance without freeing memory.
+      只会销毁实例属性，解除相应的引用关系，并不会释放对应内存。
+      综上流程，可以在释放的几个节点做处理，也可以在最终的free函数处理。
+      
+      ###### 2.1）处理结点一 free( ) 函数
+      ​	①使用fishhook库，实现对free( )函数的hook操作<br>
+      ​	②在hook函数中，对已经释放的内存，进行填充0x55的操作，另外需要保护该内存区域不被重新覆盖<br>
+      ​	③因为保存0x55内存会导致一定的内存压力，需要设置最大内存阀值，并且设置内存告警清理逻辑<br>
+      ​	④Crash出现时，为了获得较为全面的错误信息，可以通过NSProxy子类实现，重写消息转发的三个方法<br>
+      ​	⑤NSProxy只能做OC对象的代理，所以需要在hook函数中增加对象类型的判断
 
-             > If set, fill memory that has been allocated with 0xaa bytes.
-             > This increases the likelihood that a program making assumptions about the contents of freshly allocated memory will fail.
-             > Also if set, fill memory that has been deallocated with 0x55 bytes.
-             > This increases the likelihood that a program will fail due to accessing memory that is no longer allocated.
-             > Note that due to the way in which freed memory is managed internally, the 0x55 pattern may not appear in some parts of a deallocated memory block.
-             >
-             > 如果设置，则用0xaa字节填充已分配的内存。
-             > 这增加了对新分配内存内容进行假设的程序失败的可能性。
-             > 同样，如果设置了，则用0x55字节填充已释放的内存。
-             > 这增加了程序由于访问不再分配的内存而失败的可能性。
-             > 注意，由于内部管理释放内存的方式，0x55模式可能不会出现在已释放内存块的某些部分。
+      ###### 2.2）处理节点二 delloc( )函数
+      ​	实现步骤与free类似，不同点就是侵入点的不同，在侵入点前加入了逻辑判断，以减少后续操作
 
-             ​	==总结：开启了malloc scribble后，申请内存 alloc 时在内存上填`0xAA`，释放内存 dealloc 在内存上填 `0x55`。==
 
-             ​	该方案针对的2种情况而设定：①初始化未完成或者未开始，就被访问了	②对象被释放后，又被访问了
 
-             ###### 2）如何实现
 
-             ​		按照官方对 Malloc Scribble的思路，结合遇到的类似问题点，可以在对象被释放的时间点做处理，继而引出对象释放的流程：
+   ##### Zombie Objects 僵尸对象解决方式
+   ###### 1）僵尸对象定义：
+   > Once an Objective-C or Swift object no longer has any strong references to it, the object is deallocated. Attempting to further send messages to the object as if it were still a valid object is a “use after free” issue, with the deallocated object still receiving messages called a zombie object.
+   >
+   > 关键点在于给僵尸对象发消息，可以响应，然后发生崩溃
 
-             ​		**delloc( )** ---> **rootDelloc( )** ---> **fastPath( )判定** ---> **YES** ---> **free( )**
+   ###### 2）如何实现：
+      ①：method swizzling替换NSObject的allocWithZone方法，在新的方法中判断该类型对象是否需要加入野指针防护，如果需要，则通过objc_setAssociatedObject为该对象设置flag标记，被标记的对象后续会进入zombie流程<br>
+      >该阶段的过滤流程，可以着重开发者维护的类，因为系统类的实例发生野指针的概率较小
 
-             ​																            ↓
+      ②：method swizzling替换NSObject的dealloc方法，对flag标记的对象实例调用objc_destructInstance，释放该实例引用的相关属性，然后将实例的isa修改为自定义的ZombieObject。通过objc_setAssociatedObject 保存将原始类名保存在该实例中<br>
+      
+      ③：在ZombieObject 通过消息转发机制forwardingTargetForSelector处理所有拦截的方法，根据selector动态添加能够处理方法的响应者的XXObject 实例，然后通过objc_getAssociatedObject 获取之前保存该实例对应的原始类名，统计错误数据<br>
+      
+      >ZombieObject的处理和unrecognized selector crash 无响应的处理是一样，主要的目的就是拦截所有传给ZombieObject的函数，用一个返回为空的函数来替换，从而达到程序不崩溃的目的 (线上防Crash措施)
 
-             ​																           **NO**		
+      ④：程序退到后台或者达到未释放实例的上限时或内存达到上限时，调用原有dealloc方法释放所有被zombie化的实例
 
-             ​																            ↓			
-
-        ​																执行 **object_dispose( )** --> **objc_destructInstance( )** ---> **free( )**
-
-        ​					其中**objc_destructInstance**定义：Destroys an instance without freeing memory.
-
-        ​					只会销毁实例属性，解除相应的引用关系，并不会释放对应内存。
-
-        ​					综上流程，可以在释放的几个节点做处理，也可以在最终的free函数处理。
-
-        ​					**2.1）处理结点一 free( ) 函数**
-
-        ​						①使用fishhook库，实现对free( )函数的hook操作
-
-        ​						②在hook函数中，对已经释放的内存，进行填充0x55的操作，另外需要保护该内存区域不被重新覆盖
-
-        ​						③因为保存0x55内存会导致一定的内存压力，需要设置最大内存阀值，并且设置内存告警清理逻辑
-
-        ​						④Crash出现时，为了获得较为全面的错误信息，可以通过NSProxy子类实现，重写消息转发的三个方法
-
-        ​						⑤NSProxy只能做OC对象的代理，所以需要在hook函数中增加对象类型的判断
-
-        ​					**2.2）处理节点二 delloc( )函数**
-
-        ​						实现步骤与free类似，不同点就是侵入点的不同，在侵入点前加入了逻辑判断，以减少后续操作
-
-        
-
-      - ##### Zombie Objects 僵尸对象解决方式
-
-        ###### 1）僵尸对象定义：
-
-        > Once an Objective-C or Swift object no longer has any strong references to it, the object is deallocated. Attempting to further send messages to the object as if it were still a valid object is a “use after free” issue, with the deallocated object still receiving messages called a zombie object.
-        >
-        > 关键点在于给僵尸对象发消息，可以响应，然后发生崩溃
-
-        ###### 2）如何实现：
-
-        ​	①：method swizzling替换NSObject的allocWithZone方法，在新的方法中判断该类型对象是否需要加入野指针防护，如果需要，则通过objc_setAssociatedObject为该对象设置flag标记，被标记的对象后续会进入zombie流程
-
-        > 该阶段的过滤流程，可以着重开发者维护的类，因为系统类的实例发生野指针的概率较小
-
-        ​	②：method swizzling替换NSObject的dealloc方法，对flag标记的对象实例调用objc_destructInstance，释放该实例引用的相关属性，然后将实例的isa修改为自定义的ZombieObject。通过objc_setAssociatedObject 保存将原始类名保存在该实例中
-
-        ​	③：在ZombieObject 通过消息转发机制forwardingTargetForSelector处理所有拦截的方法，根据selector动态添加能够处理方法的响应者的XXObject 实例，然后通过objc_getAssociatedObject 获取之前保存该实例对应的原始类名，统计错误数据
-
-        > ZombieObject的处理和unrecognized selector crash 无响应的处理是一样，主要的目的就是拦截所有传给ZombieObject的函数，用一个返回为空的函数来替换，从而达到程序不崩溃的目的 <线上防Crash措施>
-
-        ​	④：程序退到后台或者达到未释放实例的上限时或内存达到上限时，调用原有dealloc方法释放所有被zombie化的实例
-
-        > Tips：僵尸对象的解决野指针，通过动态方式插入一个空实现的方法来防止Crash，但是交互层需要作额外处理，负责业务可能处于异常状态。另外内存方面因为生成了新的僵尸对象，释放内存需作考虑。野指针的zombie保护机制只能在其实例对象仍然缓存在zombie的缓存机制时才有效，若在实例真正释放之后，再调用野指针还是会出现Crash。
+      >Tips：僵尸对象的解决野指针，通过动态方式插入一个空实现的方法来防止Crash，但是交互层需要作额外处理，负责业务可能处于异常状态。另外内存方面因为生成了新的僵尸对象，释放内存需作考虑。野指针的zombie保护机制只能在其实例对象仍然缓存在zombie的缓存机制时才有效，若在实例真正释放之后，再调用野指针还是会出现Crash。
 
    
 
