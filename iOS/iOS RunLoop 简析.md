@@ -43,7 +43,7 @@
 
     - source1 事件：主动唤醒runloop进行处理，通常用来线程间通讯和处理硬件接口信号
 
-      > source1由runLoop和内核管理，source1带有mach_port_t，可以接收内核消息并触发回调。如 **CFMachPort**、**CFMessagePort**都是source1。Source1除了包含回调指针外包含一个mach port，Source1可以监听系统端，通过内核和其他线程通信，接收、分发系统事件，它能够主动唤醒RunLoop(由操作系统内核进行管理，例如CFMessagePort消息)。官方也指出可以自定义Source，因此对于CFRunLoopSourceRef来说它更像一种协议，框架已经默认定义了两种实现，如果有必要开发人员也可以自定义，详细情况可以查看[官方文档](https://link.juejin.cn?target=https%3A%2F%2Fdeveloper.apple.com%2Flibrary%2Fcontent%2Fdocumentation%2FCocoa%2FConceptual%2FMultithreading%2FRunLoopManagement%2FRunLoopManagement.html)。
+      > source1由runLoop和内核管理，source1带有mach_port_t，可以接收内核消息并触发回调。如 **CFMachPort**、**CFMessagePort**都是source1。Source1除了包含回调指针外包含一个mach port，Source1可以监听系统端，通过内核和其他线程通信，接收、分发系统事件，它能够主动唤醒RunLoop(由操作系统内核进行管理，例如CFMessagePort消息)。官方也指出可以自定义Source，因此对于CFRunLoopSourceRef来说它更像一种协议，框架已经默认定义了两种实现，如果有必要开发人员也可以自定义，详细情况可以查看[官方文档](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/Multithreading/RunLoopManagement/RunLoopManagement.html)。
 
       ```objective-c
       typedef struct {
